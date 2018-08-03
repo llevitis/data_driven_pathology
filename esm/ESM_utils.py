@@ -425,21 +425,15 @@ def Convert_ROI_values_to_Probabilities(roi_matrix, norm_matrix = None,
     if fail_behavior not in ['nan', 'values']:
         raise IOError('fail_behavior must be set to "nan" or "values"')
     
-    if type(roi_matrix) == pandas.core.frame.DataFrame:
-        roi_matrix = pandas.DataFrame(roi_matrix,copy=True)
     if type(roi_matrix) != pandas.core.frame.DataFrame:
         if type(roi_matrix) == np.ndarray:
-            roi_matrix = np.array(roi_matrix,copy=True)
             roi_matrix = pandas.DataFrame(roi_matrix)
         else:
             raise IOError('roi_matrix type not recognized. Pass pandas DataFrame or np.ndarray')
     
     if type(norm_matrix) != type(None):
-        if type(norm_matrix) == pandas.core.frame.DataFrame:
-            norm_matrix = pandas.DataFrame(norm_matrix,copy=True)
         if type(norm_matrix) != pandas.core.frame.DataFrame:
             if type(norm_matrix) == np.ndarray:
-                norm_matrix = np.array(norm_matrix,copy=True)
                 norm_matrix = pandas.DataFrame(norm_matrix)
             else:
                 raise IOError('roi_matrix type not recognized. Pass pandas DataFrame or np.ndarray')
@@ -454,9 +448,7 @@ def Convert_ROI_values_to_Probabilities(roi_matrix, norm_matrix = None,
     if type(models) == type(None):
         for col in roi_matrix.columns:
             if not all([x==0 for x in roi_matrix[col]]):
-                results.loc[:,col] = ecdf_tfm(roi_matrix[col], norm_matrix[col])
-                if target_distribution == 'left':
-                    results.loc[:,col] = (1 - results.loc[:,col].values)
+                results.loc[:,col] = ecdf_tfm(roi_matrix[col], norm_matrix[col], target_distribution)
                 final_report = None
             else:
                 results.loc[:,col] = [0 for x in range(len(roi_matrix[col]))]
@@ -499,8 +491,11 @@ def Convert_ROI_values_to_Probabilities(roi_matrix, norm_matrix = None,
             final_report.to_csv(os.path.join(outdir, 'model_choice_report.csv'))
         return results, final_report
     
-def ecdf_tfm(target_col, norm_col):
-    return ed.ECDF(norm_col.values)(target_col.values)
+def ecdf_tfm(target_col, norm_col, target_distribution):
+    if target_distribution == 'right': 
+        return ed.ECDF(norm_col.values)(target_col.values)
+    elif target_distribution == 'left':
+        return ed.ECDF(norm_col.values, side='left')(target_col.values)
 
 def model_tfm(target_col, norm_col, models, target_distribution, fail_behavior):
     
@@ -514,7 +509,7 @@ def model_tfm(target_col, norm_col, models, target_distribution, fail_behavior):
     report.update({'n_components': model.n_components})
     
     if model.n_components == 1:
-        tfm = ecdf_tfm(target_col, norm_col)
+        tfm = ecdf_tfm(target_col, norm_col, target_distribution)
         report.update({'reversed': 'False'})
         report.update({'perc. positive': np.nan})
         report.update({'problem': 'False'})
@@ -625,7 +620,7 @@ def Evaluate_Model(roi, models, bins=None):
         plt.title(label)
         plt.show()
 
-def Plot_Probabilites(prob_matrix, col_order = [], ind_order = [], 
+def Plot_Probabilities(prob_matrix, col_order = [], ind_order = [], 
 					  vmin=None, vmax=None, figsize=()):
     '''
     Given the output matrix of Convert_ROI_values_to_Probabilities, will plot
@@ -854,9 +849,10 @@ def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name,
                 jnk = loadmat(mtx)
                 connmat = jnk[conn_mat_names[i]]
             newmat = np.array([thing[goodcols] for thing in connmat[goodcols]])
+            prob_matrices.update({conn_out_names[i]: newmat})
             jnk[file_name] = newmat
             savemat(os.path.join(output_dir,conn_out_names[i]), jnk)
-            print('new connecitity matrix size: for %s'%conn_out_names[i],newmat.shape)
+            print('new connectivity matrix size: for %s'%conn_out_names[i],newmat.shape)
             if figure:
                 plt.close()
                 try:
@@ -880,7 +876,7 @@ def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name,
     if len(conn_matrices) > 0:
         print('===connectivity matrices===')
         for i in range(len(conn_matrices)):
-            print(os.path.join(output_dir,conn_out_names[i]), conn_out_names[i])
+            print(os.path.join(output_dir,conn_out_names[i]) + '.mat')
 
 def Evaluate_ESM_Results(results, sids, save=True, 
                          labels = None, lit = False, plot = True):
