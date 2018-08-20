@@ -2,6 +2,7 @@ import os
 import pandas
 import numpy as np
 import nibabel as ni
+import itertools
 from glob import glob
 import statsmodels.distributions.empirical_distribution as ed
 import matplotlib.pyplot as plt
@@ -10,6 +11,7 @@ from scipy import stats
 from scipy.io import savemat,loadmat
 from matplotlib import mlab
 from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import MinMaxScaler
 from statsmodels.sandbox.stats.multicomp import multipletests
 
 def Extract_Values_from_Atlas(files_in, atlas, 
@@ -370,7 +372,8 @@ def fix_atlas(atl):
 def Convert_ROI_values_to_Probabilities(roi_matrix, norm_matrix = None,
                                         models = None,
                                         target_distribution = 'right',
-                                        outdir = False, fail_behavior = 'nan'):
+                                        outdir = False, fail_behavior = 'nan',
+                                        mixed_probability = False, mp_thresh = 0.05):
     '''
     Will take a Subject x ROI array of values and convert them to probabilities,
     using ECDF (monomial distribution) or Gaussian Mixture models (binomial
@@ -416,6 +419,14 @@ def Convert_ROI_values_to_Probabilities(roi_matrix, norm_matrix = None,
         'nan' will return NaNs for all ROIs that fail
         'values' will return probability values from one the distributions (selected
         arbitrarily)
+        
+    mixed_probability -- Experimental setting. If set to True, after calculating
+    probabilities, for rois with n_components > 1 only, will set all values < 
+    mp_thresh to 0. Remaining values will be put through ECDF. This will create less
+    of a binarized distribution for n_components > 1 ROIs.
+    
+    mp_thresh -- Threshold setting for mixed_probability. Must be a float between 0
+    and 1. Decides the arbitrary probability of "tau positivity". Default is 0.05.
     
     '''
 
@@ -430,6 +441,9 @@ def Convert_ROI_values_to_Probabilities(roi_matrix, norm_matrix = None,
             roi_matrix = pandas.DataFrame(roi_matrix)
         else:
             raise IOError('roi_matrix type not recognized. Pass pandas DataFrame or np.ndarray')
+    
+    if mixed_probability:
+        holdout_mtx = pandas.DataFrame(roi_matrix, copy=True)
     
     if type(norm_matrix) != type(None):
         if type(norm_matrix) != pandas.core.frame.DataFrame:
@@ -480,6 +494,9 @@ def Convert_ROI_values_to_Probabilities(roi_matrix, norm_matrix = None,
             print('%s ROIs showed unexpected fitting behavior. See report...'%fails)
     else:
         raise ValueError('models must be a dict object or must be set to "ecdf". You passed a %s'%(type(models)))
+    
+    if mixed_probability:
+        results = mixed_probability_transform(results, holdout_mtx, mp_thresh, final_report)
     
     if type(final_report) == type(None):
         if outdir:
@@ -562,7 +579,7 @@ def model_tfm(target_col, norm_col, models, target_distribution, fail_behavior):
                 
                 
     return tfm, report
-                
+
 def compare_models(models, norm_col):
     modz = []
     labs = []
@@ -579,6 +596,20 @@ def compare_models(models, norm_col):
     winning_label = labs[winner_id]
     
     return winning_mod, winning_label
+
+def mixed_probability_transform(p_matrix, original_matrix, mp_thresh, report):
+    for col in original_matrix.columns:
+        if report.loc[col,'n_components'] == 2:
+            newcol = pandas.Series(
+                    [0 if p_matrix.loc[x, col] < mp_thresh else original_matrix.loc[x,col] for x in original_matrix.index]
+                                  )
+            if len(newcol[newcol>0]) > 0:
+                newcol[newcol>0] = ecdf_tfm(newcol[newcol>0], newcol[newcol>0])
+
+            p_matrix.loc[:,col] = newcol
+    
+    return p_matrix
+        
 
 def Evaluate_Model(roi, models, bins=None):
     '''
@@ -1416,4 +1447,189 @@ def generate_matrix_from_atlas_old(files_in, atlas):
     return f_mat
 
 
+def W_Transform(roi_matrix, covariates, norm_index = [], 
+                columns = [], verbose = False):
+    
+    '''
+    Depending on inputs, this function will either regress selected 
+    variables out of an roi_matrix, or will perform a W-transform on an 
+    roi_matrix.
+    
+    W-transform is represented as such:
+    
+    (Pc - A) / SDrc
+    
+    Where Pc is the predicted value of the roi *based on the covariates 
+    of the norm sample*; A = actual value of the roi; SDrc = standard 
+    deviation of the residuals *or the norm sample*
+    
+    roi_matrix = a subjects x ROI array
+    
+    covariates = a subject x covariates array
+    
+    norm_index = index pointing exclusively to subjects to be used for
+    normalization. If norm index is passed, W-transformation will be 
+    performed using these subjects as the norm_sample (see equation 
+    above). If no norm_index is passed, covariates will simply be
+    regressed out of all ROIs.
+    
+    columns = the columns to use fron the covariate matrix. If none, 
+    all columns if the covariate matrix will be used.
+    
+    verbose = If True, will notify upon the completion of each ROI
+    transformation.
+    '''
+    
+    if type(roi_matrix) != pandas.core.frame.DataFrame:
+        raise IOError('roi_matrix must be a subjects x ROIs pandas DataFrame')
+    if type(covariates) != pandas.core.frame.DataFrame:
+        raise IOError('covariates must be a subjects x covariates pandas DataFrame')
+    
+    covariates = clean_time(covariates)
+    roi_matrix = clean_time(roi_matrix)
+    
+    if len(columns) > 0:
+        covs = pandas.DataFrame(covariates[columns], copy=True)
+    else:
+        covs = pandas.DataFrame(covariates, copy=True)
+    
+    if covs.shape[0] != roi_matrix.shape[0]:
+        raise IOError('length of indices for roi_matrix and covariates must match')
+    else:
+        data = pandas.concat([roi_matrix, covs], axis=1)
+    
+    output = pandas.DataFrame(np.zeros_like(roi_matrix.values),
+                             index = roi_matrix.index,
+                             columns = roi_matrix.columns)
+    
+    if len(norm_index) == 0:
+        for roi in roi_matrix.columns:
+            eq = '%s ~'%roi
+            for i,col in enumerate(covs.columns):
+                if i != len(covs.columns) - 1:
+                    eq += ' %s +'%col
+                else:
+                    eq += ' %s'%col
+            mod = smf.ols(eq, data = data).fit()
+            output.loc[:,roi] = mod.resid
+            if verbose:
+                print('finished',roi)
+    else:
+        for roi in roi_matrix.columns:
+            eq = '%s ~'%roi
+            for i,col in enumerate(covs.columns):
+                if i != len(covs.columns) - 1:
+                    eq += ' %s +'%col
+                else:
+                    eq += ' %s'%col
+            mod = smf.ols(eq, data=data.loc[norm_index]).fit()
+            predicted = mod.predict(data)
+            w_score = (data.loc[:,roi] - predicted) / mod.resid.std()
+            output.loc[:,roi] = w_score
+            if verbose:
+                print('finished',roi)
+    
+    return output
 
+def clean_time(df):
+    
+    df = pandas.DataFrame(df, copy=True)
+    symbols = ['.','-',' ', ':', '/','&']
+    ncols = []
+    for col in df.columns:
+        for symbol in symbols:
+            if symbol in col:
+                col = col.replace(symbol,'_')
+        ncols.append(col)
+    
+    df.columns = ncols
+    
+    return df
+                
+
+def Weight_Connectome(base_cx, weight_cx, method = 'min', symmetric = True,
+                     transform = MinMaxScaler(), transform_when = 'post',
+                     illustrative = False, return_weight_mtx = False):
+    
+    if method not in ['min','mean','max']:
+        raise IOError('a value of "min" or "mean" must be passed for method argument')
+    
+    choices = ['prae','post','both','never']
+    if transform_when not in choices:
+        raise IOError('transform_when must be set to one of the following: %s'%choices)
+    
+    if len(np.array(weight_cx.shape)) == 1 or np.array(weight_cx).shape[-1] == 1:
+        print('1D array passed. Transforming to 2D matrix using %s method'%method)
+        weight_cx = create_connectome_from_1d(weight_cx, method, symmetric)
+    
+    if transform_when == 'pre' or transform_when == 'both':
+        weight_cx = transform.fit_transform(weight_cx)
+    
+    if base_cx.shape == weight_cx.shape:
+        if illustrative:
+            plt.close()
+            sns.heatmap(base_cx)
+            plt.title('base_cx')
+            plt.show()
+            
+            plt.close()
+            sns.heatmap(weight_cx)
+            plt.title('weight_cx')
+            plt.show()
+            
+        weighted_cx = base_cx * weight_cx
+        
+        if illustrative:
+            plt.close()
+            sns.heatmap(weighted_cx)
+            plt.title('final (weighted) cx')
+            plt.show()
+    else:
+        raise ValueError('base_cx (%s) and weight_cx %s do not have the sampe shape'%(
+                                                                            base_cx.shape,
+                                                                            weight_cx.shape))
+    
+    if transform_when == 'post' or transform_when == 'both':
+        transform.fit_transform(weighted_cx)
+    
+    if return_weight_mtx:
+        return weighted_cx, weight_cx
+    else:
+        return weighted_cx
+    
+def create_connectome_from_1d(cx, method, symmetric):
+    
+    nans = [x for x in range(len(cx)) if not pandas.notnull(cx[x])]
+    if len(nans) > 1:
+        raise ValueError('Values at indices %s are NaNs. Cannot compute'%nans)
+    
+    weight_cx = np.zeros((len(cx),len(cx)))
+    if method == 'min':
+        if symmetric:
+            for i,j in list(itertools.product(range(len(cx)),repeat=2)):
+                weight_cx[i,j] = min([cx[i],cx[j]])
+        else:
+            for i,j in itertools.combinations(range(len(cx)),2):
+                weight_cx[i,j] = min([cx[i],cx[j]])
+                rotator = np.rot90(weight_cx, 2)
+                weight_cx = weight_cx + rotator
+    elif method == 'mean':
+        if symmetric:
+            for i,j in list(itertools.product(range(len(cx)),repeat=2)):
+                weight_cx[i,j] = np.mean([cx[i],cx[j]])
+        else:
+            for i,j in itertools.combinations(range(len(cx)),2):
+                weight_cx[i,j] = np.mean([cx[i],cx[j]])
+                rotator = np.rot90(weight_cx, 2)
+                weight_cx = weight_cx + rotator
+    elif method == 'max':
+        if symmetric:
+            for i,j in list(itertools.product(range(len(cx)),repeat=2)):
+                weight_cx[i,j] = max([cx[i],cx[j]])
+        else:
+            for i,j in itertools.combinations(range(len(cx)),2):
+                weight_cx[i,j] = max([cx[i],cx[j]])
+                rotator = np.rot90(weight_cx, 2)
+                weight_cx = weight_cx + rotator
+    
+    return weight_cx
