@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from scipy.io import savemat,loadmat
+from nilearn import input_data
 from matplotlib import mlab
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import MinMaxScaler
@@ -1134,7 +1135,9 @@ def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reductio
         - a list of subject paths OR
         - a subject X image matrix
         
-    altas = a path to a labeled regional atlas in the same space as the PET data
+    atlas = multiple options:
+        - a path to a labeled regional atlas in the same space as the PET data
+        - if analysis was done in native space, a path to a list of labeled regional atlases
     
     ref = multiple options:
         - If None, no probabilities will be calculated, and script will simply extract
@@ -1142,13 +1145,16 @@ def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reductio
         - If a path to a reference region mask, will calculate voxelwise probabilities
         based on values within the reference region. Mask must be in the same space as 
         as PET data and atlas
+        - List of paths to reference region masks in native space. Voxelwise probabilities
+        will be calculated based on values within the reference region.
         - If a list of integers, will combine these atlas labels with these integers to 
         make reference region 
         - if 'voxelwise', voxelwise (or atom-wise from dimension reduction) probabilities
         will be estimated. In other words, each voxel or atom will use serve as its own
         reference.
         
-    msk = A path to a binary mask file in the same space as PET data and atlas. If None,
+    msk = multiple options:
+        - A path to a binary mask file in the same space as PET data and atlas. If None,
         mask will be computed as a binary mask of the atlas.
         ** PLEASE NOTE: The mask will be used to mask the reference region! **
     
@@ -1205,124 +1211,178 @@ def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reductio
         i4d.to_filename(otpt)
     
     # load atlas
-    atlas = ni.load(atlas).get_data().astype(int)
-    if orig_atlas == True:
-        orig_atlas = np.array(atlas, copy=True)
-    if atlas.shape != i4d.shape[:3]:
-        raise ValueError('atlas dimensions do not match PET data dimensions')
+    if type(atlas) != list:
+        if type(atlas) == str:
+            try:
+                atlas = ni.load(atlas).get_data().astype(int)
+            except:
+                raise IOError('could not find an atlas at the specified location: %s'%atlas)
+            if orig_atlas == True:
+                orig_atlas = np.array(atlas, copy=True)
+            if atlas.shape != i4d.shape[:3]:
+                raise ValueError('atlas dimensions do not match PET data dimensions')
     
-    # load reference region
-    if type(ref) == str and ref != 'voxelwise': 
-        print('looking for reference image...')
-        if not os.path.isdir(ref):
-            raise IOError('Please enter a valid path for ref, or select a different option for this argument')
+        # load reference region
+        if type(ref) == str and ref != 'voxelwise':
+            print('looking for reference image...')
+            if not os.path.isdir(ref):
+                raise IOError('Please enter a valid path for ref, or select a different option for this argument')
+            else:
+                ref_msk = ni.load(ref).get_data()
+                if ref_msk.shape != i4d.shape[:3]:
+                    raise ValueError('ref region image dimensions do not match PET data dimensions')
+        elif type(ref) == list:
+            ref_msk = np.zeros_like(atlas)
+            for i in ref:
+                ref_msk[atlas == i] = 1
         else:
-            ref_msk = ni.load(ref).get_data()
+            ref_msk = None
+
+        # Mask data
+        print('masking data...')
+        if msk == None:
+            img_mask = np.array(atlas,copy=True)
+            img_mask[img_mask<1] = 0
+            img_mask[img_mask>0] = 1
+        else:
+            img_mask = ni.load(msk).get_data()
+            atlas[img_mask < 1] = 0
+
+        if type(ref_msk) != type(None):
+            ref_msk[img_mask < 1] = 0
+
+        mask_tfm = input_data.NiftiMasker(ni.Nifti1Image(img_mask,i4d.affine))
+        mi4d = mask_tfm.fit_transform(i4d)
+
+        # dimension reduction (IN BETA!)
+        if dimension_reduction:
+            print('reducing dimensions...')
+            shape = img_mask.shape
+            connectivity = grid_to_graph(n_x=shape[0], n_y=shape[1],
+                                       n_z=shape[2], mask=img_mask)
+        # main ECDF calculation (or mixture model calc)
+        skip = False
+        if ref != 'voxelwise':
+            if type(ECDF_in) != type(None):
+                print('generating ECDF...')
+                print('using user-supplied data...')
+                if type(ECDF_in) == ed.ECDF:
+                    mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
+                    input_distribution = 'not generated'
+                elif type(ECDF_in) == np.ndarray:
+                    mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
+                    input_distribution = ECDF_in
+        #       elif # add later an option for importing an external object
+                else:
+                    try:
+                        mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
+                        print('Could not understand ECDF input, but ECDF successful')
+                        input_distribution = 'not generated'
+                    except:
+                        raise IOError(
+                                'Invalid argument for ECDF in. Please enter an ndarray, an ECDF object, or a valid path')
+            else:
+                if type(ref_msk) != type(None):
+                    print('generating ECDF...')
+                    ref_tfm = input_data.NiftiMasker(ni.Nifti1Image(ref_msk,i4d.affine))
+                    refz = ref_tfm.fit_transform(i4d)
+                    mi4d_ecdf, ecref = ecdf_simple(mi4d, refz, mx=mx_model)
+                    input_distribution = refz.flat
+                else:
+                    print('skipping ECDF...')
+                    skip = True
+
+        else:
+            print('generating voxelwise ECDF...')
+            mi4d_ecdf, ECDF_array = ecdf_voxelwise(mi4d, ref_index, save_ECDF, mx=mx_model)
+            input_distribution = 'not generated'
+
+        if not skip:
+    #       if save_ECDF:
+    #           create an array and somehow write it to a file
+
+        # transform back to image-space
+            print('transforming back into image space')
+            f_images = mask_tfm.inverse_transform(mi4d_ecdf)
+
+        else:
+            #if type(ECDF):
+            print('transforming back into image space')
+            f_images = mask_tfm.inverse_transform(mi4d)
+
+        # generate output matrix
+        print('generating final subject x region matrix')
+        if type(orig_atlas) == type(None):
+            f_mat = generate_matrix_from_atlas_old(f_images, atlas)
+        else:
+            f_mat = generate_matrix_from_atlas_old(f_images, orig_atlas)
+
+        # compile (and save) outputs
+        print('preparing outputs')
+        output = {}
+        if output_type == 'py':
+            f_mat.to_csv(os.path.join(out_dir, '%s_roi_data.csv'%out_name),index=False)
+            output.update({'roi_matrix': f_mat})
+        else:
+            output.update({'roi_matrix': fmat.values})
+            output.update({'roi_matrix_columns': fmat.columns})
+        if save_matrix == 'return':
+            output.update({'4d_image_matrix': i4d})
+        if save_ECDF == 'return':
+            if output_type == 'py':
+                output.update({'ECDF_function': ECDF_array})
+            else:
+                output.update({'input_distribution': input_distribution})
+    else:
+        image_paths = load_data(files_in, return_images = False)
+        if len(atlas) != len(image_paths):
+            raise IOError('number of images (%s) does not match number of atlases (%s)'%(len(image_paths),
+                                                                                      len(atlas)))
+        if len(ref) == list:
+            if len(ref) != len(image_paths):
+                raise IOError(
+                    'number of images (%s) does not match number of ref region masks (%s)' % len(image_paths),
+                    len(ref))
+        catch = []
+        for i,image_path in enumerate(image_paths):
+            i4d = ni.load(image_path).get_data()
+            atlas = ni.load(atlas[i]).get_data()
+            if atlas.shape != i4d.shape[:3]:
+                raise ValueError('atlas dimensions do not match PET data dimensions')
+            ref_msk = ni.load(ref[i]).get_data()
             if ref_msk.shape != i4d.shape[:3]:
                 raise ValueError('ref region image dimensions do not match PET data dimensions')
-    elif type(ref) == list:
-        ref_msk = np.zeros_like(atlas)
-        for i in ref:
-            ref_msk[atlas == i] = 1
-    else:
-        ref_msk = None
-    
-    
-    # Mask data
-    print('masking data...')
-    if msk == None:
-        img_mask = np.array(atlas,copy=True)
-        img_mask[img_mask<1] = 0
-        img_mask[img_mask>0] = 1
-    else:
-        img_mask = ni.load(msk).get_data()
-        atlas[img_mask < 1] = 0
-    
-    if type(ref_msk) != type(None):
-        ref_msk[img_mask < 1] = 0
-    
-    mask_tfm = input_data.NiftiMasker(ni.Nifti1Image(img_mask,i4d.affine))
-    mi4d = mask_tfm.fit_transform(i4d)
-    
-    # dimension reduction (IN BETA!)
-    if dimension_reduction:
-        print('reducing dimensions...')
-        shape = img_mask.shape
-        connectivity = grid_to_graph(n_x=shape[0], n_y=shape[1],
-                                   n_z=shape[2], mask=img_mask)
-    # main ECDF calculation (or mixture model calc)
-    skip = False
-    if ref != 'voxelwise':
-        if type(ECDF_in) != type(None): 
-            print('generating ECDF...')
-            print('using user-supplied data...')
-            if type(ECDF_in) == ed.ECDF:
-                mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
-                input_distribution = 'not generated'
-            elif type(ECDF_in) == np.ndarray:
-                mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
-                input_distribution = ECDF_in
-    #       elif # add later an option for importing an external object 
+            # Mask data
+            if msk == None:
+                img_mask = np.array(atlas, copy=True)
+                img_mask[img_mask < 1] = 0
+                img_mask[img_mask > 0] = 1
             else:
-                try:
-                    mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
-                    print('Could not understand ECDF input, but ECDF successful')
-                    input_distribution = 'not generated'
-                except:
-                    raise IOError(
-                            'Invalid argument for ECDF in. Please enter an ndarray, an ECDF object, or a valid path')
-        else:
+                img_mask = ni.load(msk).get_data()
+                atlas[img_mask < 1] = 0
+
             if type(ref_msk) != type(None):
-                print('generating ECDF...')
-                ref_tfm = input_data.NiftiMasker(ni.Nifti1Image(ref_msk,i4d.affine))
-                refz = ref_tfm.fit_transform(i4d)
-                mi4d_ecdf, ecref = ecdf_simple(mi4d, refz, mx=mx_model)
-                input_distribution = refz.flat
-            else:
-                print('skipping ECDF...')
-                skip = True
-    
-    else:
-        print('generating voxelwise ECDF...')
-        mi4d_ecdf, ECDF_array = ecdf_voxelwise(mi4d, ref_index, save_ECDF, mx=mx_model)
-        input_distribution = 'not generated'
-        
-    if not skip:
-#       if save_ECDF:
-#           create an array and somehow write it to a file
-        
-    # transform back to image-space
-        print('transforming back into image space')
-        f_images = mask_tfm.inverse_transform(mi4d_ecdf)
-    
-    else:
-        #if type(ECDF):
-        print('transforming back into image space')
-        f_images = mask_tfm.inverse_transform(mi4d)
-    
-    # generate output matrix
-    print('generating final subject x region matrix')
-    if type(orig_atlas) == type(None):
-        f_mat = generate_matrix_from_atlas_old(f_images, atlas)
-    else:
-        f_mat = generate_matrix_from_atlas_old(f_images, orig_atlas)
-    
-    # compile (and save) outputs
-    print('preparing outputs')
-    output = {}
-    if output_type == 'py':
-        f_mat.to_csv(os.path.join(out_dir, '%s_roi_data.csv'%out_name),index=False)
-        output.update({'roi_matrix': f_mat})
-    else:
-        output.update({'roi_matrix': fmat.values})
-        output.update({'roi_matrix_columns': fmat.columns})
-    if save_matrix == 'return':
-        output.update({'4d_image_matrix': i4d})
-    if save_ECDF == 'return':
-        if output_type == 'py':
-            output.update({'ECDF_function': ECDF_array})
-        else:
-            output.update({'input_distribution': input_distribution})
+                ref_msk[img_mask < 1] = 0
+
+            mask_tfm = input_data.NiftiMasker(ni.Nifti1Image(img_mask, i4d.affine))
+            mi4d = mask_tfm.fit_transform(i4d)
+
+            # Calculate voxelwise ECDF with respect to ref region in native space
+            if type(ECDF_in) == type(None):
+                if type(ref_msk) != type(None):
+                    print('generating ECDF...')
+                    ref_tfm = input_data.NiftiMasker(ni.Nifti1Image(ref_msk, i4d.affine))
+                    refz = ref_tfm.fit_transform(i4d)
+                    mi4d_ecdf, ecref = ecdf_simple(mi4d, refz, mx=mx_model)
+                    input_distribution = refz.flat
+                else:
+                    print('skipping ECDF...')
+                    skip = True
+
+
+            #f_mat = generate_matrix_from_atlas(img, atl, labels, sid)
+            #catch.append(f_mat)
+        roi_vals = pandas.concat(catch)
     
 def load_data_old(files_in):
     
@@ -1412,7 +1472,7 @@ def ecdf_voxelwise(mi4d, ref_index, save_ECDF, mx=0):
             if mx == 0:
                 ECDF_array = np.array([ed.ECDF(mi4d[:,x]) for x in range(y)]).transpose()
                 print('transforming data...')
-                mi4d_ecdf = np.array([ECDF_matrix[x](mi4d[:,x]) for x in range(y)]
+                mi4d_ecdf = np.array([ECDF_array[x](mi4d[:,x]) for x in range(y)]
                                          ).transpose()
             else:
                 raise IOError('at this stage, cant save mixture model info....sorry...')
@@ -1429,7 +1489,7 @@ def ecdf_voxelwise(mi4d, ref_index, save_ECDF, mx=0):
             else:
                 ECDF_array = [ed.ECDF(mi4d[ref_index,x]) for x in range(y)]
                 print('transforming data...')
-                mi4d_ecdf = ecdf_voxelwise = np.array([ECDF_matrix[x](mi4d[good_ind,x]) for x in range(y)]
+                mi4d_ecdf = np.array([ECDF_array[x](mi4d[good_ind,x]) for x in range(y)]
                                          ).transpose()
         else:
             ### COMING SOON!
