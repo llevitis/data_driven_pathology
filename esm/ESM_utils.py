@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from scipy.io import savemat,loadmat
-from nilearn import input_data
+from nilearn import input_data, image
 from matplotlib import mlab
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import MinMaxScaler
@@ -1121,7 +1121,7 @@ def Plot_Individual(matrix, index, style='ROI', label = None):
         plt.title(label)
     plt.show()
 
-def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reduction = False,
+def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduction = False,
                      ECDF_in = None, output_type = 'py', out_dir = './', out_name = 'PET_data', 
                      save_matrix = False, save_ECDF = False, save_images = False, ref_index = [],
                     mx_model = 0, orig_atlas = None):
@@ -1198,23 +1198,22 @@ def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reductio
     print('initiating...')
     if output_type != 'py' and output_type != 'mat':
         raise IOError('output_type must be set to py or mat')
-    
-    
+
     # Initialize variables
     
     # Load data
     print('loading data...')
-    i4d = load_data_old(files_in) # load PET data
+    i4d = load_data(files_in, return_images=False) # load PET data
     if save_matrix == 'save':
         otpt = os.path.join(out_dir,'%s_4d_data'%out_name)
         print('saving 4d subject x scan to nifti image: \n',otpt)
         i4d.to_filename(otpt)
     
     # load atlas
-    if type(atlas) != list:
-        if type(atlas) == str:
+    if type(atlases) != list:
+        if type(atlases) == str:
             try:
-                atlas = ni.load(atlas).get_data().astype(int)
+                atlas = ni.load(atlases).get_data().astype(int)
             except:
                 raise IOError('could not find an atlas at the specified location: %s'%atlas)
             if orig_atlas == True:
@@ -1317,36 +1316,37 @@ def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reductio
         else:
             f_mat = generate_matrix_from_atlas_old(f_images, orig_atlas)
 
-        # compile (and save) outputs
-        print('preparing outputs')
-        output = {}
-        if output_type == 'py':
-            f_mat.to_csv(os.path.join(out_dir, '%s_roi_data.csv'%out_name),index=False)
-            output.update({'roi_matrix': f_mat})
-        else:
-            output.update({'roi_matrix': fmat.values})
-            output.update({'roi_matrix_columns': fmat.columns})
-        if save_matrix == 'return':
-            output.update({'4d_image_matrix': i4d})
-        if save_ECDF == 'return':
-            if output_type == 'py':
-                output.update({'ECDF_function': ECDF_array})
-            else:
-                output.update({'input_distribution': input_distribution})
+        # # compile (and save) outputs
+        # print('preparing outputs')
+        # output = {}
+        # if output_type == 'py':
+        #     f_mat.to_csv(os.path.join(out_dir, '%s_roi_data.csv'%out_name),index=False)
+        #     output.update({'roi_matrix': f_mat})
+        # else:
+        #     output.update({'roi_matrix': f_mat.values})
+        #     output.update({'roi_matrix_columns': f_mat.columns})
+        # if save_matrix == 'return':
+        #     output.update({'4d_image_matrix': i4d})
+        # if save_ECDF == 'return':
+        #     if output_type == 'py':
+        #         output.update({'ECDF_function': ECDF_array})
+        #     else:
+        #         output.update({'input_distribution': input_distribution})
     else:
-        image_paths = load_data(files_in, return_images = False)
-        if len(atlas) != len(image_paths):
-            raise IOError('number of images (%s) does not match number of atlases (%s)'%(len(image_paths),
-                                                                                      len(atlas)))
+        #image_paths = load_data(files_in, return_images = False)
+        if len(atlases) != len(files_in):
+            raise IOError('number of images (%s) does not match number of atlases (%s)'%(len(files_in),
+                                                                                   len(files_in)))
         if len(ref) == list:
-            if len(ref) != len(image_paths):
+            if len(ref) != len(files_in):
                 raise IOError(
-                    'number of images (%s) does not match number of ref region masks (%s)' % len(image_paths),
+                    'number of images (%s) does not match number of ref region masks (%s)' % len(files_in),
                     len(ref))
         catch = []
-        for i,image_path in enumerate(image_paths):
-            i4d = ni.load(image_path).get_data()
-            atlas = ni.load(atlas[i]).get_data()
+        for i in range(0, len(files_in)):
+            print(files_in[i])
+            i4d = ni.load(files_in[i])
+            atlas = ni.load(atlases[i]).get_data()
             if atlas.shape != i4d.shape[:3]:
                 raise ValueError('atlas dimensions do not match PET data dimensions')
             ref_msk = ni.load(ref[i]).get_data()
@@ -1368,6 +1368,7 @@ def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reductio
             mi4d = mask_tfm.fit_transform(i4d)
 
             # Calculate voxelwise ECDF with respect to ref region in native space
+            skip = False
             if type(ECDF_in) == type(None):
                 if type(ref_msk) != type(None):
                     print('generating ECDF...')
@@ -1378,16 +1379,42 @@ def Prepare_PET_Data(files_in, atlas, ref = None, msk = None, dimension_reductio
                 else:
                     print('skipping ECDF...')
                     skip = True
+            if not skip:
+                print('transforming back into image space')
+                f_images = mask_tfm.inverse_transform(mi4d_ecdf)
+            else:
+                # if type(ECDF):
+                print('transforming back into image space')
+                f_images = mask_tfm.inverse_transform(mi4d)
+            # generate output matrix
+            print('generating final subject x region matrix')
+            if type(orig_atlas) == type(None):
+                f_mat_single = generate_matrix_from_atlas_old(f_images, atlas)
+            else:
+                f_mat_single = generate_matrix_from_atlas_old(f_images, orig_atlas)
+            catch.append(f_mat_single)
+        f_mat = pandas.concat(catch)
+    print('preparing outputs')
+    output = {}
+    if output_type == 'py':
+        f_mat.to_csv(os.path.join(out_dir, '%s_roi_data.csv' % out_name), index=False)
+        output.update({'roi_matrix': f_mat})
+    else:
+        output.update({'roi_matrix': f_mat.values})
+        output.update({'roi_matrix_columns': f_mat.columns})
+    if save_matrix == 'return':
+        output.update({'4d_image_matrix': i4d})
+    if save_ECDF == 'return':
+        if output_type == 'py':
+            output.update({'ECDF_function': ECDF_array})
+        else:
+            output.update({'input_distribution': input_distribution})
+        return output
 
-
-            #f_mat = generate_matrix_from_atlas(img, atl, labels, sid)
-            #catch.append(f_mat)
-        roi_vals = pandas.concat(catch)
-    
 def load_data_old(files_in):
-    
+
     fail = False
-    
+
     if type(files_in) == str:
         if os.path.isdir(files_in):
             print('It seems you passed a directory')
