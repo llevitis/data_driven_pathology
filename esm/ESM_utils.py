@@ -813,34 +813,34 @@ def Evaluate_Probabilities(prob_matrix, to_test, alpha_threshold = 0.05, FDR=Non
                   
     return ps
 
-def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name, 
-                           conn_matrices = [], conn_mat_names = [], 
+def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name,
+                           conn_matrices = [], conn_mat_names = [],
                            conn_out_names = [], figure = True):
     '''
-    This script will convert data into a matfile compatible with 
+    This script will convert data into a matfile compatible with
     running the ESM, and will print outputs to be entered into
     ESM launcher script. The script will also adjust connectomes
     to accomodate missing (masked) ROIs.
-    
-    prob_matrices -- a dict object matching string labels to 
-    probability matrices (pandas DataFrames). These will be 
-    converted into a matlab structure. Columns with all 0s will be 
+
+    prob_matrices -- a dict object matching string labels to
+    probability matrices (pandas DataFrames). These will be
+    converted into a matlab structure. Columns with all 0s will be
     removed automatically.
-        NOTE: All prob_matrices should the same shape, and a 
+        NOTE: All prob_matrices should the same shape, and a
         matching number of non-zero columns. If they do not, run the
         script separately for these matrices.
-    
+
     ages -- an array the same length of prob_matrices that contains
     the age of each subject.
-    
+
     output_dir -- an existing directory where all outputs will be
     written to
-    
+
     file_name -- the name of the output matfile. Do not include a
     file extension
-    
+
     conn_matrices -- a list of paths to matfiles or csvs containing
-    connectomes that match the atlas used to intially extract data. 
+    connectomes that match the atlas used to intially extract data.
     if your probability matrix does not have columns with 0s
     (because, for example, you used a mask), this argument can be
     left unchanged. Otherwise, the script will chop up the
@@ -848,15 +848,15 @@ def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name,
     in the probability matrices.
         NOTE: passing this argument requires passing an argument for
         conn_out_names
-        
-    con_mat_names -- a list the same length of conn_matrices that 
+
+    con_mat_names -- a list the same length of conn_matrices that
     contains string labels
-    
+
     '''
 
     if type(prob_matrices) != dict:
         raise IOError('prob_matrices must be a dict object')
-    
+
     col_lens = []
     for lab, df in prob_matrices.items():
         good_cols = [y for y in df.columns if not all([x==0 for x in df[y]])]
@@ -864,9 +864,9 @@ def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name,
         prob_matrices.update({lab: df[good_cols].values.T})
     if not all([x == col_lens[0] for x in col_lens]):
         raise IOError('all probability matrices entered must have the same # of non-zero columns')
-    
+
     goodcols = [y for y in range(len(df.columns)) if not all([x==0 for x in df[df.columns[y]]])]
-    
+
     if len(conn_matrices) > 0:
         if not len(conn_matrices) == len(conn_out_names):
             raise ValueError('equal length lists must be passed for conn_matrices and out_names')
@@ -888,9 +888,10 @@ def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name,
                 jnk = loadmat(mtx)
                 connmat = jnk[conn_mat_names[i]]
             newmat = np.array([thing[goodcols] for thing in connmat[goodcols]])
+            prob_matrices.update({conn_out_names[i]: newmat})
             jnk[file_name] = newmat
             savemat(os.path.join(output_dir,conn_out_names[i]), jnk)
-            print('new connecitity matrix size: for %s'%conn_out_names[i],newmat.shape)
+            print('new connectivity matrix size: for %s'%conn_out_names[i],newmat.shape)
             if figure:
                 plt.close()
                 try:
@@ -914,7 +915,7 @@ def Prepare_Inputs_for_ESM(prob_matrices, ages, output_dir, file_name,
     if len(conn_matrices) > 0:
         print('===connectivity matrices===')
         for i in range(len(conn_matrices)):
-            print(os.path.join(output_dir,conn_out_names[i]), conn_out_names[i])
+            print(os.path.join(output_dir,conn_out_names[i]) + '.mat')
 
 def Evaluate_ESM_Results(results, sids, save=True, 
                          labels = None, lit = False, plot = True):
@@ -1032,8 +1033,8 @@ def Plot_ESM_results(mat, labels, subids, lit):
     # regional accuracy across subjects
     plt.close()
     sns.regplot(mat['ref_pattern'].mean(1), mat['model_solutions0'].mean(1))
-    plt.xlabel('Avg ROI tau Probability Across Subjects')
-    plt.ylabel('Avg Predicted ROI tau Probability Across Subjects')
+    plt.xlabel('Avg ROI Amyloid Probability Across Subjects')
+    plt.ylabel('Avg Predicted ROI Amyloid Probability Across Subjects')
     plt.title('Regional accuracy across subjects')
     plt.show()
     r,p = stats.pearsonr(mat['ref_pattern'].mean(1), mat['model_solutions0'].mean(1))
@@ -1367,7 +1368,7 @@ def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduct
             mask_tfm = input_data.NiftiMasker(ni.Nifti1Image(img_mask, i4d.affine))
             mi4d = mask_tfm.fit_transform(i4d)
 
-            # Calculate voxelwise ECDF with respect to ref region in native space
+            #Calculate voxelwise ECDF with respect to ref region in native space
             skip = False
             if type(ECDF_in) == type(None):
                 if type(ref_msk) != type(None):
@@ -1382,6 +1383,7 @@ def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduct
             if not skip:
                 print('transforming back into image space')
                 f_images = mask_tfm.inverse_transform(mi4d_ecdf)
+                print(mi4d_ecdf)
             else:
                 # if type(ECDF):
                 print('transforming back into image space')
@@ -1392,6 +1394,7 @@ def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduct
                 f_mat_single = generate_matrix_from_atlas_old(f_images, atlas)
             else:
                 f_mat_single = generate_matrix_from_atlas_old(f_images, orig_atlas)
+            #f_mat_single = ecdf_main(mi4d=mi4d, i4d=i4d, atlas=atlas, ref=ref, mask_tfm = mask_tfm)
             catch.append(f_mat_single)
         f_mat = pandas.concat(catch)
     print('preparing outputs')
@@ -1410,6 +1413,65 @@ def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduct
         else:
             output.update({'input_distribution': input_distribution})
         return output
+
+def ecdf_main(mi4d, i4d, atlas, ref, mask_tfm, mx_model=0, ref_msk=None, save_ECDF=False, ECDF_in=None, ref_index=[],
+              skip=False, orig_atlas=None):
+    if ref != 'voxelwise':
+        if type(ECDF_in) != type(None):
+            print('generating ECDF...')
+            print('using user-supplied data...')
+            if type(ECDF_in) == ed.ECDF:
+                mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
+                input_distribution = 'not generated'
+            elif type(ECDF_in) == np.ndarray:
+                mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
+                input_distribution = ECDF_in
+    #       elif # add later an option for importing an external object
+            else:
+                try:
+                    mi4d_ecdf, ecref = ecdf_simple(mi4d, ECDF_in, mx=mx_model)
+                    print('Could not understand ECDF input, but ECDF successful')
+                    input_distribution = 'not generated'
+                except:
+                    raise IOError(
+                            'Invalid argument for ECDF in. Please enter an ndarray, an ECDF object, or a valid path')
+        else:
+            if type(ref_msk) != type(None):
+                print('generating ECDF...')
+                ref_tfm = input_data.NiftiMasker(ni.Nifti1Image(ref_msk,i4d.affine))
+                refz = ref_tfm.fit_transform(i4d)
+                mi4d_ecdf, ecref = ecdf_simple(mi4d, refz, mx=mx_model)
+                input_distribution = refz.flat
+            else:
+                print('skipping ECDF...')
+                skip = True
+
+    else:
+        print('generating voxelwise ECDF...')
+        mi4d_ecdf, ECDF_array = ecdf_voxelwise(mi4d, ref_index, save_ECDF, mx=mx_model)
+        input_distribution = 'not generated'
+
+    if not skip:
+#       if save_ECDF:
+#           create an array and somehow write it to a file
+
+    # transform back to image-space
+        print('transforming back into image space')
+        f_images = mask_tfm.inverse_transform(mi4d_ecdf)
+
+    else:
+        #if type(ECDF):
+        print('transforming back into image space')
+        f_images = mask_tfm.inverse_transform(mi4d)
+
+    # generate output matrix
+    print('generating final subject x region matrix')
+    if type(orig_atlas) == type(None):
+        f_mat = generate_matrix_from_atlas_old(f_images, atlas)
+    else:
+        f_mat = generate_matrix_from_atlas_old(f_images, orig_atlas)
+    return f_mat
+
 
 def load_data_old(files_in):
 
