@@ -11,6 +11,7 @@ from scipy import stats
 from scipy.io import savemat,loadmat
 from nilearn import input_data, image
 from matplotlib import mlab
+from sklearn.utils import resample
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.sandbox.stats.multicomp import multipletests
@@ -1125,7 +1126,7 @@ def Plot_Individual(matrix, index, style='ROI', label = None):
 def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduction = False,
                      ECDF_in = None, output_type = 'py', out_dir = './', out_name = 'PET_data', 
                      save_matrix = False, save_ECDF = False, save_images = False, ref_index = [],
-                    mx_model = 0, orig_atlas = None):
+                    mx_model = 0, orig_atlas = None, esm2014method = False):
     ''' This is a function that will take several PET images and an atlas and will
     return a subject X region matrix. If specified, the function will also calculate 
     probabilities (via ECDF) either voxelwise, or using a specified reference region
@@ -1317,24 +1318,7 @@ def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduct
         else:
             f_mat = generate_matrix_from_atlas_old(f_images, orig_atlas)
 
-        # # compile (and save) outputs
-        # print('preparing outputs')
-        # output = {}
-        # if output_type == 'py':
-        #     f_mat.to_csv(os.path.join(out_dir, '%s_roi_data.csv'%out_name),index=False)
-        #     output.update({'roi_matrix': f_mat})
-        # else:
-        #     output.update({'roi_matrix': f_mat.values})
-        #     output.update({'roi_matrix_columns': f_mat.columns})
-        # if save_matrix == 'return':
-        #     output.update({'4d_image_matrix': i4d})
-        # if save_ECDF == 'return':
-        #     if output_type == 'py':
-        #         output.update({'ECDF_function': ECDF_array})
-        #     else:
-        #         output.update({'input_distribution': input_distribution})
     else:
-        #image_paths = load_data(files_in, return_images = False)
         if len(atlases) != len(files_in):
             raise IOError('number of images (%s) does not match number of atlases (%s)'%(len(files_in),
                                                                                    len(files_in)))
@@ -1375,8 +1359,11 @@ def Prepare_PET_Data(files_in, atlases, ref = None, msk = None, dimension_reduct
                     print('generating ECDF...')
                     ref_tfm = input_data.NiftiMasker(ni.Nifti1Image(ref_msk, i4d.affine))
                     refz = ref_tfm.fit_transform(i4d)
-                    mi4d_ecdf, ecref = ecdf_simple(mi4d, refz, mx=mx_model)
-                    input_distribution = refz.flat
+                    if esm2014method:
+                        mi4d_ecdf, ecref = ecdf_voxelwise_bootstrapped_maxvalues_refregion(mi4d, refz)
+                    else:
+                        mi4d_ecdf, ecref = ecdf_simple(mi4d, refz, mx=mx_model)
+                        input_distribution = refz.flat
                 else:
                     print('skipping ECDF...')
                     skip = True
@@ -1523,6 +1510,18 @@ def dim_reduction(mi4d, connectivity, dimension_reduction):
     mi4d = ward.transform(mi4d)
 
     return mi4d
+
+def ecdf_voxelwise_bootstrapped_maxvalues_refregion(mi4d, refz):
+    refz_max_values = []
+    for i in range(0, 40000):
+        resampled_refz = resample(refz.flatten(), n_samples=500, replace=True)
+        percentile_75th_value = np.percentile(resampled_refz, 75)
+        refz_max_values.append(percentile_75th_value)
+    refz_max_array = np.array(refz_max_values)
+    refz_max_array = np.reshape(refz_max_array, (1, len(refz_max_array)))
+    mi4d_ecdf, ecref = ecdf_simple(mi4d, refz_max_array, mx=0)
+    return mi4d_ecdf, ecref
+
 
 def ecdf_simple(mi4d, refz, mx=0):
 
